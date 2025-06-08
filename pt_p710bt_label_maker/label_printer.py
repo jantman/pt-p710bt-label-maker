@@ -171,9 +171,10 @@ class PtP710LabelPrinter:
         self._send_select_compression_mode()
         i: int
         for i, image in enumerate(images):
+            logger.info('Printing label %d of %d', i + 1, num_copies)
+            image.seek(0)
             data: bytearray = encode_png(image, self._tape_mm)
             logger.debug('Encoded to bytearray of length %d', len(data))
-            logger.info('Printing label %d of %d', i + 1, num_copies)
             self._send_print_information_command(len(data))
             self._send_raster_data(data)
             if i == len(images) - 1:
