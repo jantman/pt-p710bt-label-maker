@@ -148,15 +148,26 @@ class BarcodeLabelGenerator:
             self.barcode.render(writer_options=writer_opts)
         )
 
-    def _get_num_modules(self) -> int:
+    def _get_num_modules(self, _mod_width: int = 1) -> int:
+        logger.debug(
+            'Calculating number of modules for "%s" with DPI=%s, module_width=%s',
+            self.value, self.DPI, self.px2mm(1)
+        )
         writer: ImageWriter = ImageWriter(format='PNG')
         writer.dpi = self.DPI
         writer_opts: Dict = dict(self.barcode_cls.default_writer_options)
-        writer_opts['module_width'] = self.px2mm(1)
+        writer_opts['module_width'] = self.px2mm(_mod_width)
         writer_opts['quiet_zone'] = 0
         writer.set_options(writer_opts)
-        barcode: Barcode = self.barcode_cls(self.value, writer=writer)
-        _image: Image = barcode.render(writer_options=writer_opts)
+        try:
+            barcode: Barcode = self.barcode_cls(self.value, writer=writer)
+            _image: Image = barcode.render(writer_options=writer_opts)
+        except ValueError:
+            logger.warning(
+                'Invalid minimum barcode module width; increasing to %spx',
+                _mod_width
+            )
+            return self._get_num_modules(_mod_width=_mod_width + 1)
         logger.debug(
             'Minimum barcode width (1 module == 1 px): %s', _image.width
         )
@@ -179,8 +190,11 @@ class BarcodeLabelGenerator:
     def _get_text_dimensions(
         self, font: ImageFont.FreeTypeFont, draw: ImageDraw, text: str
     ) -> Tuple[int, int]:
-        # modified to use same method as barcode.writer
-        return font.getsize(text)
+        """Returns text dimensions (width, height) for a given font and text."""
+        bbox = font.getbbox(text)
+        width = bbox[2] - bbox[0]
+        height = bbox[3] - bbox[1]
+        return width, height
 
     def _fit_text_to_box(
         self, max_height: int, max_width: Optional[int] = None
