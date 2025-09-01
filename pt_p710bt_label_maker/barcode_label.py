@@ -38,7 +38,8 @@ class BarcodeLabelGenerator:
     def __init__(
         self, value: str, height_px: int, maxlen_px: Optional[int] = None,
         font_filename: str = 'DejaVuSans.ttf',
-        barcode_class_name: str = 'Code128', show_text: bool = True
+        barcode_class_name: str = 'Code128', show_text: bool = True,
+        fixed_len_px: Optional[int] = None
     ):
         self.value: str = value
         self.show_text: bool = show_text
@@ -78,6 +79,8 @@ class BarcodeLabelGenerator:
             self._image = self._generate_combined_image()
         else:
             self._image = self._barcode_image
+        if fixed_len_px:
+            self._image = self._center_in_width(self._image, fixed_len_px)
 
     def _white_to_transparent(self, img: Image) -> Image:
         img = img.convert("RGBA")
@@ -257,6 +260,18 @@ class BarcodeLabelGenerator:
         if i not in ['y', 'Y']:
             raise SystemExit(1)
 
+    def _center_in_width(self, img: Image, width_px: int) -> Image:
+        img_w, img_h = img.size
+        background: Image = Image.new(
+            'RGBA',
+            (width_px, img_h),
+            (255, 255, 255, 0)
+        )
+        bg_w, bg_h = background.size
+        offset = ((bg_w - img_w) // 2, (bg_h - img_h) // 2)
+        background.paste(img, offset)
+        return background
+
     @property
     def file_obj(self) -> BytesIO:
         i: BytesIO = BytesIO()
@@ -312,6 +327,10 @@ def main():
                         type=float, help='Maximum label length in inches')
     maxlen.add_argument('--maxlen-mm', dest='maxlen_mm', action='store',
                         type=float, help='Maximum label length in mm')
+    p.add_argument(
+        '--fixed-len-px', dest='fixed_len_px', action='store', type=int,
+        default=None, help='Center barcode in fixed length image of this many pixels long'
+    )
     p.add_argument('-f', '--font-filename', dest='font_filename', type=str,
                    action='store', default='DejaVuSans.ttf',
                    help='Font filename; Default: DejaVuSans.ttf')
@@ -339,7 +358,7 @@ def main():
         g = BarcodeLabelGenerator(
             i, height_px=height, maxlen_px=args.maxlen_px,
             font_filename=args.font_filename, barcode_class_name=args.symbology,
-            show_text=args.show_text
+            show_text=args.show_text, fixed_len_px=args.fixed_len_px
         )
         if args.save_only:
             g.save(args.filename)
