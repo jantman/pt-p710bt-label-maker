@@ -294,6 +294,134 @@ class BarcodeLabelGenerator:
         return i
 
 
+class FlagModeGenerator:
+    """
+    Generates flag-style barcode labels with two rotated barcodes at opposite ends
+    for wrapping around wires/cables.
+    """
+    
+    def __init__(
+        self, value: str, height_px: int, maxlen_px: int,
+        font_filename: str = 'DejaVuSans.ttf',
+        barcode_class_name: str = 'Code128', show_text: bool = True,
+        fixed_len_px: Optional[int] = None
+    ):
+        self.value = value
+        self.height_px = height_px
+        self.maxlen_px = maxlen_px
+        self.font_filename = font_filename
+        self.barcode_class_name = barcode_class_name
+        self.show_text = show_text
+        self.fixed_len_px = fixed_len_px
+        
+        if maxlen_px is None:
+            raise ValueError("Flag mode requires maxlen to be specified")
+        
+        logger.debug(
+            'Initializing FlagModeGenerator value="%s", height_px=%d, maxlen_px=%d, fixed_len_px=%s',
+            value, height_px, maxlen_px, fixed_len_px
+        )
+        
+        self._image = self._generate_flag_image()
+    
+    def _generate_flag_image(self) -> Image:
+        """Generate the flag-style image with rotated barcodes at each end."""
+        
+        # Use fixed_len_px if provided, otherwise use maxlen_px
+        total_width = self.fixed_len_px if self.fixed_len_px is not None else self.maxlen_px
+        
+        # Calculate dimensions for the rotated barcodes
+        # When rotated 90°, the barcode height becomes width, and width becomes height
+        # So we need the barcode to fit within the tape height when rotated
+        barcode_max_width_when_rotated = self.height_px
+        
+        # We'll allocate roughly 1/3 of the total length for each barcode
+        # But ensure minimum viable barcode length
+        single_barcode_length = max(total_width // 3, 150)  # minimum 150px
+        
+        logger.debug(
+            'Flag mode: total_width=%dpx, single_barcode_length=%dpx, '
+            'barcode_max_width_when_rotated=%dpx',
+            total_width, single_barcode_length, barcode_max_width_when_rotated
+        )
+        
+        # Generate a single barcode that will fit when rotated
+        # The height_px for the generator should be what will become the width after rotation
+        # Use None for maxlen to let the barcode size itself optimally, then we'll constrain it
+        barcode_gen = BarcodeLabelGenerator(
+            value=self.value,
+            height_px=barcode_max_width_when_rotated,
+            maxlen_px=None,  # Let it size itself first
+            font_filename=self.font_filename,
+            barcode_class_name=self.barcode_class_name,
+            show_text=self.show_text
+        )
+        
+        # Get the generated barcode image
+        barcode_img = barcode_gen._image
+        
+        # If the barcode is too wide for our allocation, we'll scale it down
+        if barcode_img.width > single_barcode_length:
+            scale_factor = single_barcode_length / barcode_img.width
+            new_width = int(barcode_img.width * scale_factor)
+            new_height = int(barcode_img.height * scale_factor)
+            barcode_img = barcode_img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+            logger.debug('Scaled barcode from original size to %dx%d', new_width, new_height)
+        
+        # Rotate the barcode images
+        left_barcode = barcode_img.rotate(-90, expand=True)
+        right_barcode = barcode_img.rotate(90, expand=True)
+        
+        logger.debug(
+            'Generated barcode: %dx%d, rotated left: %dx%d, rotated right: %dx%d',
+            barcode_img.width, barcode_img.height,
+            left_barcode.width, left_barcode.height,
+            right_barcode.width, right_barcode.height
+        )
+        
+        # Create the main flag image
+        flag_img = Image.new(
+            'RGBA',
+            (total_width, self.height_px),
+            (255, 255, 255, 0)
+        )
+        
+        # Paste left barcode at the left edge, centered vertically
+        left_y_offset = (self.height_px - left_barcode.height) // 2
+        flag_img.paste(left_barcode, (0, left_y_offset))
+        
+        # Paste right barcode at the right edge, centered vertically
+        right_x_offset = total_width - right_barcode.width
+        right_y_offset = (self.height_px - right_barcode.height) // 2
+        flag_img.paste(right_barcode, (right_x_offset, right_y_offset))
+        
+        logger.info(
+            'Generated flag mode image: %dx%d with barcodes at positions '
+            '(0,%d) and (%d,%d)',
+            flag_img.width, flag_img.height,
+            left_y_offset, right_x_offset, right_y_offset
+        )
+        
+        return flag_img
+    
+    def save(self, filename: str):
+        logger.info('Saving flag mode image to: %s', filename)
+        self._image.save(filename)
+    
+    def show(self):
+        self._image.show()
+        i = input('Print this image? [y|N]').strip()
+        if i not in ['y', 'Y']:
+            raise SystemExit(1)
+    
+    @property
+    def file_obj(self) -> BytesIO:
+        i: BytesIO = BytesIO()
+        self._image.save(i, format='PNG')
+        i.seek(0)
+        return i
+
+
 def main():
     fname: str = datetime.now().strftime('%Y%m%dT%H%M%S') + '.png'
     p = argparse.ArgumentParser(
@@ -334,6 +462,11 @@ def main():
         '-t', '--no-text', dest='show_text', action='store_false', default=True,
         help='Do not show text below barcode'
     )
+    p.add_argument(
+        '-F', '--flag', dest='flag_mode', action='store_true', default=False,
+        help='Flag mode: place two rotated barcodes at opposite ends of the label '
+             'for wrapping around wires. Requires maxlen to be specified.'
+    )
     maxlen = p.add_mutually_exclusive_group()
     maxlen.add_argument('--maxlen-px', dest='maxlen_px', action='store',
                         type=int, help='Maximum label length in pixels')
@@ -359,26 +492,40 @@ def main():
         dpi = args.lp_dpi
         height = args.lp_width_px
     if args.maxlen_in:
-        args.maxlen_px = args.maxlen_in * dpi
+        args.maxlen_px = int(args.maxlen_in * dpi)
     elif args.maxlen_mm:
-        args.maxlen_px = (args.maxlen_mm / 25.4) * dpi
+        args.maxlen_px = int((args.maxlen_mm / 25.4) * dpi)
     # set logging level
     if args.verbose:
         set_log_debug(logger)
     else:
         set_log_info(logger)
+
+    # BEGIN generating images
     images: List[BytesIO] = []
     for i in args.BARCODE_VALUE:
-        g = BarcodeLabelGenerator(
-            i, height_px=height, maxlen_px=args.maxlen_px,
-            font_filename=args.font_filename, barcode_class_name=args.symbology,
-            show_text=args.show_text, fixed_len_px=args.fixed_len_px
-        )
+        if args.flag_mode:
+            # generate an image for a barcode in flag mode
+            if args.maxlen_px is None:
+                raise ValueError("Flag mode requires maxlen to be specified (use --maxlen-px, --maxlen-inches, or --maxlen-mm)")
+            g = FlagModeGenerator(
+                i, height_px=height, maxlen_px=args.maxlen_px,
+                font_filename=args.font_filename, barcode_class_name=args.symbology,
+                show_text=args.show_text, fixed_len_px=args.fixed_len_px
+            )
+        else:
+            g = BarcodeLabelGenerator(
+                i, height_px=height, maxlen_px=args.maxlen_px,
+                font_filename=args.font_filename, barcode_class_name=args.symbology,
+                show_text=args.show_text, fixed_len_px=args.fixed_len_px
+            )
         if args.save_only:
             g.save(args.filename)
         if args.preview:
             g.show()
         images.append(g.file_obj)
+    # END generating images
+
     if args.save_only:
         raise SystemExit(0)
     if args.lp:
