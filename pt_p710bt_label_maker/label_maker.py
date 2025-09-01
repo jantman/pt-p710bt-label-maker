@@ -499,6 +499,15 @@ def main():
         args.maxlen_px = args.maxlen_in * dpi
     elif args.maxlen_mm:
         args.maxlen_px = (args.maxlen_mm / 25.4) * dpi
+    
+    # Validate that rotation modes require maxlen to be specified
+    if (args.rotate or args.rotate_repeat) and args.maxlen_px is None:
+        raise SystemExit(
+            'ERROR: When using --rotate (-r) or --rotate-repeat (-R), you must '
+            'specify a maximum label length using one of: --maxlen-px, '
+            '--maxlen-inches, or --maxlen-mm'
+        )
+    
     # set logging level
     if args.verbose:
         set_log_debug(logger)
