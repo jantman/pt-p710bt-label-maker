@@ -1,4 +1,5 @@
 import sys
+import os
 import argparse
 import logging
 from typing import Optional, Tuple, Dict, Any, List, Literal, Callable
@@ -478,9 +479,11 @@ def main():
         '--fixed-len-px', dest='fixed_len_px', action='store', type=int,
         default=None, help='Center barcode in fixed length image of this many pixels long'
     )
+    def_font: str = os.environ.get('PT_FONT_FILE', 'DejaVuSans.ttf')
     p.add_argument('-f', '--font-filename', dest='font_filename', type=str,
-                   action='store', default='DejaVuSans.ttf',
-                   help='Font filename; Default: DejaVuSans.ttf')
+                   action='store', default=def_font,
+                   help=f'Font filename; Default: {def_font} ('
+                        'default taken from PT_FONT_FILE env var if set)')
     p.add_argument(
         'BARCODE_VALUE', action='store', type=str, help='Value for barcode',
         nargs='+'
