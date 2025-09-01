@@ -324,57 +324,153 @@ class FlagModeGenerator:
         
         self._image = self._generate_flag_image()
     
+    def _fit_text_to_box(self, text: str, max_height: int, max_width: Optional[int],
+                         min_size: int = 6, max_size: int = 144, size_step: int = 2) -> Tuple[ImageFont.FreeTypeFont, int, int]:
+        """Return a font that fits within max_height and optional max_width for given text."""
+        # Temporary canvas for measurement
+        img = Image.new("RGB", (2, 2), (255, 255, 255))
+        draw = ImageDraw.Draw(img)
+        chosen_font = ImageFont.truetype(self.font_filename, size=min_size)
+        chosen_w, chosen_h = 0, 0
+        for size in range(min_size, max_size + 1, size_step):
+            try:
+                f = ImageFont.truetype(self.font_filename, size=size)
+            except OSError:
+                continue
+            bbox = f.getbbox(text)
+            w = bbox[2] - bbox[0]
+            h = bbox[3] - bbox[1]
+            if h <= max_height and (max_width is None or w <= max_width):
+                chosen_font, chosen_w, chosen_h = f, w, h
+            else:
+                break
+        return chosen_font, ceil(chosen_w), chosen_h
+
+    def _compose_end_image(self, end_height: int, max_end_width: int) -> Image:
+        """Compose one end (barcode with text below) with tight spacing.
+        Returns an unrotated end image of height=end_height and width<=max_end_width.
+        """
+        # Tuning knobs (flag mode only)
+        TEXT_GAP_PX = 2
+        BOTTOM_MARGIN_PX = 2
+        TOP_MARGIN_PX = 0
+        MIN_BAR_HEIGHT = 16  # px, absolute minimum for readability
+        TEXT_HEIGHT_RATIO = 0.24  # portion of end height reserved for text
+
+        # Fit text first (if required) within a target band and width
+        text_w = text_h = 0
+        font = None
+        if self.show_text:
+            target_text_max_h = max(8, int(end_height * TEXT_HEIGHT_RATIO))
+            font, text_w, text_h = self._fit_text_to_box(
+                self.value, max_height=target_text_max_h, max_width=max_end_width
+            )
+            # Ensure we leave enough height for bars; if not, shrink text
+            available_for_bars = end_height - (TOP_MARGIN_PX + TEXT_GAP_PX + BOTTOM_MARGIN_PX + text_h)
+            if available_for_bars < MIN_BAR_HEIGHT:
+                # Re-fit text with smaller max height
+                new_text_max_h = max(4, end_height - (TOP_MARGIN_PX + TEXT_GAP_PX + BOTTOM_MARGIN_PX + MIN_BAR_HEIGHT))
+                font, text_w, text_h = self._fit_text_to_box(
+                    self.value, max_height=new_text_max_h, max_width=max_end_width
+                )
+
+        # Determine bar height using remaining space (estimate)
+        bar_height_est = end_height - (TOP_MARGIN_PX + (TEXT_GAP_PX + text_h + BOTTOM_MARGIN_PX if self.show_text else 0))
+        bar_height_est = max(MIN_BAR_HEIGHT, bar_height_est)
+        # Generate barcode-only image constrained to max_end_width
+        barcode_gen = BarcodeLabelGenerator(
+            value=self.value,
+            height_px=bar_height_est,
+            maxlen_px=max_end_width,
+            font_filename=self.font_filename,
+            barcode_class_name=self.barcode_class_name,
+            show_text=False
+        )
+        barcode_img = barcode_gen._image
+        if barcode_img.width > max_end_width:
+            scale = max_end_width / barcode_img.width
+            barcode_img = barcode_img.resize((int(barcode_img.width * scale), int(barcode_img.height * scale)), Image.Resampling.LANCZOS)
+            logger.debug('Scaled barcode in end composition to %dx%d', barcode_img.width, barcode_img.height)
+
+        # Ensure the actual barcode height leaves room for text gap and bottom margin
+        if self.show_text:
+            available_text_h = end_height - (TOP_MARGIN_PX + barcode_img.height + TEXT_GAP_PX + BOTTOM_MARGIN_PX)
+            if available_text_h < text_h:
+                # Refit text down to available height
+                new_text_max_h = max(0, available_text_h)
+                if new_text_max_h > 0:
+                    font, text_w, text_h = self._fit_text_to_box(
+                        self.value, max_height=new_text_max_h, max_width=max_end_width
+                    )
+                # Recompute availability after refit
+                available_text_h = end_height - (TOP_MARGIN_PX + barcode_img.height + TEXT_GAP_PX + BOTTOM_MARGIN_PX)
+                if available_text_h < text_h:
+                    # As a last resort, scale down barcode to make space for text
+                    needed_bar_h = end_height - (TOP_MARGIN_PX + TEXT_GAP_PX + BOTTOM_MARGIN_PX + text_h)
+                    needed_bar_h = max(MIN_BAR_HEIGHT, needed_bar_h)
+                    if needed_bar_h > 0 and barcode_img.height > needed_bar_h:
+                        scale = needed_bar_h / barcode_img.height
+                        barcode_img = barcode_img.resize((max(1, int(barcode_img.width * scale)), max(1, int(barcode_img.height * scale))), Image.Resampling.LANCZOS)
+                        logger.debug('Scaled barcode height down to %d to avoid text overlap', barcode_img.height)
+
+        # End canvas width must fit both barcode and text
+        end_width = max(barcode_img.width, text_w if self.show_text else 0)
+        end_width = min(end_width, max_end_width)
+        end_img = Image.new('RGBA', (end_width, end_height), (255, 255, 255, 0))
+
+        # Paste barcode at top center
+        bar_x = (end_width - barcode_img.width) // 2
+        bar_y = TOP_MARGIN_PX
+        end_img.paste(barcode_img, (bar_x, bar_y), barcode_img)
+
+        # Draw text tightly under barcode, clamping to bottom margin
+        if self.show_text:
+            draw = ImageDraw.Draw(end_img)
+            text_top = TOP_MARGIN_PX + barcode_img.height + TEXT_GAP_PX
+            text_center_y = text_top + (text_h // 2)
+            max_center = end_height - BOTTOM_MARGIN_PX - (text_h // 2)
+            text_center_y = min(text_center_y, max_center)
+            text_center_x = end_width // 2
+            draw.text((text_center_x, text_center_y), self.value, fill=(0, 0, 0, 255), font=font, anchor='mm')
+        return end_img
+
     def _generate_flag_image(self) -> Image:
         """Generate the flag-style image with rotated barcodes at each end."""
         
         # Use fixed_len_px if provided, otherwise use maxlen_px
         total_width = self.fixed_len_px if self.fixed_len_px is not None else self.maxlen_px
         
-        # Calculate dimensions for the rotated barcodes
-        # When rotated 90°, the barcode height becomes width, and width becomes height
-        # So we need the barcode to fit within the tape height when rotated
-        barcode_max_width_when_rotated = self.height_px
-        
-        # We'll allocate roughly 1/3 of the total length for each barcode
-        # But ensure minimum viable barcode length
-        single_barcode_length = max(total_width // 3, 150)  # minimum 150px
-        
-        logger.debug(
-            'Flag mode: total_width=%dpx, single_barcode_length=%dpx, '
-            'barcode_max_width_when_rotated=%dpx',
-            total_width, single_barcode_length, barcode_max_width_when_rotated
-        )
-        
-        # Generate a single barcode that will fit when rotated
-        # The height_px for the generator should be what will become the width after rotation
-        # Use None for maxlen to let the barcode size itself optimally, then we'll constrain it
-        barcode_gen = BarcodeLabelGenerator(
-            value=self.value,
-            height_px=barcode_max_width_when_rotated,
-            maxlen_px=single_barcode_length,
-            font_filename=self.font_filename,
-            barcode_class_name=self.barcode_class_name,
-            show_text=self.show_text
-        )
-        
-        # Get the generated barcode image
-        barcode_img = barcode_gen._image
-        
-        # If the barcode is too wide for our allocation, we'll scale it down
-        if barcode_img.width > single_barcode_length:
-            scale_factor = single_barcode_length / barcode_img.width
-            new_width = int(barcode_img.width * scale_factor)
-            new_height = int(barcode_img.height * scale_factor)
-            barcode_img = barcode_img.resize((new_width, new_height), Image.Resampling.LANCZOS)
-            logger.debug('Scaled barcode from original size to %dx%d', new_width, new_height)
-        
-        # Rotate the barcode images
-        left_barcode = barcode_img.rotate(-90, expand=True)
-        right_barcode = barcode_img.rotate(90, expand=True)
+        # Reserve a minimal center gap between the two rotated ends
+        CENTER_GAP_PX = 10
+
+        # Compute maximum allowed unrotated end height so rotated widths leave the center gap
+        max_end_height = max(1, (total_width - CENTER_GAP_PX) // 2)
+        if max_end_height < 1:
+            max_end_height = 1
+        end_height = min(self.height_px, max_end_height)
+        if total_width < 2 * end_height:
+            logger.debug('Adjusted end height to %dpx to maintain center gap within total width %dpx', end_height, total_width)
+
+        # Constrain the end width (unrotated) so rotated height fits within tape height
+        # Also cap by approx 1/3rd of total length to keep code dense
+        single_barcode_length = max(total_width // 3, 150)
+        single_barcode_length = min(single_barcode_length, self.height_px)
         
         logger.debug(
-            'Generated barcode: %dx%d, rotated left: %dx%d, rotated right: %dx%d',
-            barcode_img.width, barcode_img.height,
+            'Flag mode: total_width=%dpx, end_height=%dpx, end_max_width=%dpx',
+            total_width, end_height, single_barcode_length
+        )
+        
+        # Compose one end image (barcode + text tightly stacked)
+        end_img = self._compose_end_image(end_height=end_height, max_end_width=single_barcode_length)
+
+        # Rotate images for left and right ends
+        left_barcode = end_img.rotate(-90, expand=True)
+        right_barcode = end_img.rotate(90, expand=True)
+        
+        logger.debug(
+            'End (unrotated): %dx%d, rotated left: %dx%d, rotated right: %dx%d',
+            end_img.width, end_img.height,
             left_barcode.width, left_barcode.height,
             right_barcode.width, right_barcode.height
         )
@@ -386,14 +482,14 @@ class FlagModeGenerator:
             (255, 255, 255, 0)
         )
         
-        # Paste left barcode at the left edge, centered vertically
+        # Paste left barcode at the left edge, centered vertically (preserve alpha)
         left_y_offset = (self.height_px - left_barcode.height) // 2
-        flag_img.paste(left_barcode, (0, left_y_offset))
+        flag_img.paste(left_barcode, (0, left_y_offset), left_barcode)
         
-        # Paste right barcode at the right edge, centered vertically
+        # Paste right barcode at the right edge, centered vertically (preserve alpha)
         right_x_offset = total_width - right_barcode.width
         right_y_offset = (self.height_px - right_barcode.height) // 2
-        flag_img.paste(right_barcode, (right_x_offset, right_y_offset))
+        flag_img.paste(right_barcode, (right_x_offset, right_y_offset), right_barcode)
         
         logger.info(
             'Generated flag mode image: %dx%d with barcodes at positions '
