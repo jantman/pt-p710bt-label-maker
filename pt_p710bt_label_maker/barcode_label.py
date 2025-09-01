@@ -436,12 +436,13 @@ class FlagModeGenerator:
 
     def _generate_flag_image(self) -> Image:
         """Generate the flag-style image with rotated barcodes at each end."""
-        
+
         # Use fixed_len_px if provided, otherwise use maxlen_px
         total_width = self.fixed_len_px if self.fixed_len_px is not None else self.maxlen_px
-        
+
+        logger.debug('Generating flag image of total width %dpx and height %dpx', total_width, self.height_px)
         # Reserve a minimal center gap between the two rotated ends
-        CENTER_GAP_PX = 10
+        CENTER_GAP_PX = total_width // 10
 
         # Compute maximum allowed unrotated end height so rotated widths leave the center gap
         max_end_height = max(1, (total_width - CENTER_GAP_PX) // 2)
