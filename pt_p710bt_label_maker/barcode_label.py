@@ -17,6 +17,7 @@ from pt_p710bt_label_maker.label_printer import (
     Connector, UsbConnector, BluetoothConnector, PtP710LabelPrinter
 )
 from pt_p710bt_label_maker.media_info import TAPE_MM_TO_PX
+from pt_p710bt_label_maker.lp_printer import LpPrinter
 
 Alignment = Literal["center", "left", "right"]
 
@@ -271,6 +272,19 @@ def main():
     )
     add_printer_args(p)
     p.add_argument(
+        '--lp-dpi', dest='lp_dpi', action='store', type=int, default=203,
+        help='DPI for lp printing; defaults to 203dpi'
+    )
+    p.add_argument(
+        '--lp-width-px', dest='lp_width_px', action='store', type=int,
+        default=203,
+        help='Width in pixels for printing via LP; default 203'
+    )
+    p.add_argument(
+        '--lp-options', dest='lp_options', action='store', type=str, default='',
+        help='Options to pass to lp when printing'
+    )
+    p.add_argument(
         '-s', '--save-only', dest='save_only', action='store_true',
         default=False, help='Save generates image to current directory and exit'
     )
@@ -306,10 +320,15 @@ def main():
         nargs='+'
     )
     args = p.parse_args(sys.argv[1:])
+    dpi: int = BarcodeLabelGenerator.DPI
+    height: int = TAPE_MM_TO_PX[args.tape_mm]
+    if args.lp:
+        dpi = args.lp_dpi
+        height = args.lp_width_px
     if args.maxlen_in:
-        args.maxlen_px = args.maxlen_in * BarcodeLabelGenerator.DPI
+        args.maxlen_px = args.maxlen_in * dpi
     elif args.maxlen_mm:
-        args.maxlen_px = (args.maxlen_mm / 25.4) * BarcodeLabelGenerator.DPI
+        args.maxlen_px = (args.maxlen_mm / 25.4) * dpi
     # set logging level
     if args.verbose:
         set_log_debug(logger)
@@ -318,7 +337,7 @@ def main():
     images: List[BytesIO] = []
     for i in args.BARCODE_VALUE:
         g = BarcodeLabelGenerator(
-            i, height_px=TAPE_MM_TO_PX[args.tape_mm], maxlen_px=args.maxlen_px,
+            i, height_px=height, maxlen_px=args.maxlen_px,
             font_filename=args.font_filename, barcode_class_name=args.symbology,
             show_text=args.show_text
         )
@@ -329,6 +348,10 @@ def main():
         images.append(g.file_obj)
     if args.save_only:
         raise SystemExit(0)
+    if args.lp:
+        return LpPrinter(args.lp_options).print_images(
+            images, num_copies=args.num_copies
+        )
     # Begin code copied from label_printer.py
     device: Connector
     if args.usb:
