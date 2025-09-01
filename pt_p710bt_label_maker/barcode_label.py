@@ -60,11 +60,10 @@ class BarcodeLabelGenerator:
             self.value, self.symbology, self.barcode_cls, self.height_px,
             maxlen_px, show_text
         )
-        self.num_modules: int = self._get_num_modules()
+        self.num_modules: int
         self.mod_width_px: int
-        if maxlen_px is None:
-            self.mod_width_px = 2  # minimum reliable module width is 2px
-        else:
+        self.num_modules, self.mod_width_px = self._get_num_modules()
+        if self.mod_width_px > 2:
             # 11 quiet modules on each end
             self.mod_width_px = floor(self.maxlen_px / (self.num_modules + 22))
         logger.debug('Module width: %spx', self.mod_width_px)
@@ -149,7 +148,7 @@ class BarcodeLabelGenerator:
             self.barcode.render(writer_options=writer_opts)
         )
 
-    def _get_num_modules(self, _mod_width: int = 1) -> int:
+    def _get_num_modules(self, _mod_width: int = 2) -> Tuple[int, int]:
         logger.debug(
             'Calculating number of modules for "%s" with DPI=%s, module_width=%s',
             self.value, self.DPI, self.px2mm(1)
@@ -170,9 +169,9 @@ class BarcodeLabelGenerator:
             )
             return self._get_num_modules(_mod_width=_mod_width + 1)
         logger.debug(
-            'Minimum barcode width (1 module == 1 px): %s', _image.width
+            'Minimum barcode width (1 module == %s px): %s', _mod_width, _image.width
         )
-        return _image.width
+        return _image.width, _mod_width
 
     def _get_fonts(
         self, font_file: str = 'DejaVuSans.ttf', min_size: int = 4,
@@ -352,7 +351,7 @@ class FlagModeGenerator:
         barcode_gen = BarcodeLabelGenerator(
             value=self.value,
             height_px=barcode_max_width_when_rotated,
-            maxlen_px=None,  # Let it size itself first
+            maxlen_px=single_barcode_length,
             font_filename=self.font_filename,
             barcode_class_name=self.barcode_class_name,
             show_text=self.show_text
