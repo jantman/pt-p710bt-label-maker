@@ -68,6 +68,16 @@ class UsbConnector(Connector):
                 f'idProduct=0x{product_id:04x}'
             )
         logger.debug('Found device: %s', self._dev)
+        # On Linux the kernel's usblp driver usually claims the printer's
+        # interface as soon as it's plugged in, which makes set_configuration()
+        # and the endpoint reads/writes fail with "[Errno 16] Resource busy".
+        # Detach the kernel driver from interface 0 if it's currently attached.
+        try:
+            if self._dev.is_kernel_driver_active(0):
+                logger.debug('Detaching kernel driver from interface 0')
+                self._dev.detach_kernel_driver(0)
+        except (usb.core.USBError, NotImplementedError) as ex:
+            logger.debug('Could not detach kernel driver: %s', ex)
         logger.debug('Setting device configuration')
         try:
             self._dev.set_configuration()
