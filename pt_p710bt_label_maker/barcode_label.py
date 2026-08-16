@@ -26,6 +26,36 @@ BARCODE_CLASSES: Dict[str, Callable] = {
     x.__name__: x for x in Barcode.__subclasses__()
 }
 
+#: Fraction of the label height given to the barcode itself when text is shown;
+#: the remainder of the height is used for the text below the barcode.
+DEFAULT_BARCODE_HEIGHT_RATIO: float = 0.5
+
+#: Fraction of a flag-mode end's height given to the text; this is the
+#: equivalent of the leftover half of DEFAULT_BARCODE_HEIGHT_RATIO, but is kept
+#: as its own constant to preserve historical flag mode sizing.
+DEFAULT_FLAG_TEXT_HEIGHT_RATIO: float = 0.24
+
+#: Bar height (mm) below which most scanners have trouble; used only to warn.
+MIN_RECOMMENDED_BAR_HEIGHT_MM: float = 6.35  # 0.25 inch
+
+#: Conservative lower bound on rendered text height as a fraction of font size
+#: (cap height of DejaVuSans is about 0.73 of the point size). Used only to
+#: bound how large a font we ever need to try to fill a given text height.
+MIN_TEXT_HEIGHT_PER_FONT_SIZE: float = 0.7
+
+#: Cache of loaded fonts, keyed by (filename, size). We try every font size in
+#: a range to fit text to the label, and on a tall label that's hundreds of
+#: sizes per label, so avoid re-loading them for each value printed.
+_FONT_CACHE: Dict[Tuple[str, int], ImageFont.FreeTypeFont] = {}
+
+
+def load_font(font_file: str, size: int) -> ImageFont.FreeTypeFont:
+    key: Tuple[str, int] = (font_file, size)
+    if key not in _FONT_CACHE:
+        _FONT_CACHE[key] = ImageFont.truetype(font_file, size=size)
+    return _FONT_CACHE[key]
+
+
 FORMAT = "[%(asctime)s %(levelname)s] %(message)s"
 logging.basicConfig(level=logging.WARNING, format=FORMAT)
 logger = logging.getLogger()
@@ -40,8 +70,14 @@ class BarcodeLabelGenerator:
         self, value: str, height_px: int, maxlen_px: Optional[int] = None,
         font_filename: str = 'DejaVuSans.ttf',
         barcode_class_name: str = 'Code128', show_text: bool = True,
-        fixed_len_px: Optional[int] = None
+        fixed_len_px: Optional[int] = None,
+        barcode_height_ratio: float = DEFAULT_BARCODE_HEIGHT_RATIO
     ):
+        if not 0 < barcode_height_ratio < 1:
+            raise ValueError(
+                f'barcode_height_ratio must be greater than 0 and less than 1, '
+                f'not: {barcode_height_ratio}'
+            )
         self.value: str = value
         self.show_text: bool = show_text
         self.font_filename: str = font_filename
@@ -50,16 +86,35 @@ class BarcodeLabelGenerator:
         self.barcode_cls: Callable = BARCODE_CLASSES[self.symbology]
         # for height, see media_info.TAPE_MM_TO_PX
         self.height_px: int = height_px
+        self.barcode_height_ratio: float = barcode_height_ratio
         self.fonts: Dict[int, ImageFont.FreeTypeFont] = self._get_fonts(
-            font_file=font_filename
+            font_file=font_filename,
+            # tall labels need font sizes larger than the historical 144 cap,
+            # especially with a small barcode_height_ratio
+            max_size=max(
+                144,
+                ceil(self.text_max_height_px / MIN_TEXT_HEIGHT_PER_FONT_SIZE)
+            )
         )
         logger.debug('Loaded %d font options', len(self.fonts))
         logger.debug(
             'Initializing BarcodeLabelGenerator value="%s", symbology="%s" (%s)'
-            ', height_px=%d, maxlen_px=%s, show_text=%s',
+            ', height_px=%d, maxlen_px=%s, show_text=%s, '
+            'barcode_height_ratio=%s',
             self.value, self.symbology, self.barcode_cls, self.height_px,
-            maxlen_px, show_text
+            maxlen_px, show_text, barcode_height_ratio
         )
+        if (
+            self.show_text
+            and self.px2mm(self.bar_height_px) < MIN_RECOMMENDED_BAR_HEIGHT_MM
+        ):
+            logger.warning(
+                'Barcode height ratio of %s on a %dpx high label yields bars '
+                'only %dpx (%.2fmm) high; barcodes shorter than %smm may not '
+                'scan reliably.',
+                self.barcode_height_ratio, self.height_px, self.bar_height_px,
+                self.px2mm(self.bar_height_px), MIN_RECOMMENDED_BAR_HEIGHT_MM
+            )
         self.num_modules: int
         self.mod_width_px: int
         self.num_modules, self.mod_width_px = self._get_num_modules()
@@ -94,12 +149,29 @@ class BarcodeLabelGenerator:
         img.putdata(newData)
         return img
 
+    @property
+    def bar_height_px(self) -> int:
+        """
+        Height in pixels of the bars themselves (excluding the barcode image's
+        own top and bottom margins), per ``barcode_height_ratio``.
+        """
+        return floor(self.height_px * self.barcode_height_ratio)
+
+    @property
+    def text_max_height_px(self) -> int:
+        """
+        Maximum height in pixels for the text below the barcode. The text is
+        vertically centered in the height left over by the barcode, and gets
+        half of that leftover height; the rest is padding above and below it.
+        """
+        return floor(self.height_px * (1 - self.barcode_height_ratio) / 2)
+
     def _generate_combined_image(self) -> Image:
         font: ImageFont.FreeTypeFont
         text_w: int
         text_h: int
         font, text_w, text_h = self._fit_text_to_box(
-            self.height_px / 4, self.maxlen_px
+            self.text_max_height_px, self.maxlen_px
         )
         width = max([self._barcode_image.width, text_w])
         logger.debug(
@@ -183,7 +255,7 @@ class BarcodeLabelGenerator:
             font_file, min_size, max_size, size_step
         )
         return {
-            i: ImageFont.truetype(font_file, size=i)
+            i: load_font(font_file, i)
             for i in range(min_size, max_size, size_step)
         }
 
@@ -259,7 +331,7 @@ class BarcodeLabelGenerator:
         result['module_width'] = self.px2mm(self.mod_width_px)
         result['quiet_zone'] = self.px2mm(11)
         if self.show_text:
-            result['module_height'] = self.px2mm(floor(self.height_px / 2))
+            result['module_height'] = self.px2mm(self.bar_height_px)
         else:
             result['module_height'] = self.px2mm(self.height_px)
         return result
@@ -304,8 +376,14 @@ class FlagModeGenerator:
         self, value: str, height_px: int, maxlen_px: int,
         font_filename: str = 'DejaVuSans.ttf',
         barcode_class_name: str = 'Code128', show_text: bool = True,
-        fixed_len_px: Optional[int] = None
+        fixed_len_px: Optional[int] = None,
+        text_height_ratio: float = DEFAULT_FLAG_TEXT_HEIGHT_RATIO
     ):
+        if not 0 < text_height_ratio < 1:
+            raise ValueError(
+                f'text_height_ratio must be greater than 0 and less than 1, '
+                f'not: {text_height_ratio}'
+            )
         self.value = value
         self.height_px = height_px
         self.maxlen_px = maxlen_px
@@ -313,28 +391,34 @@ class FlagModeGenerator:
         self.barcode_class_name = barcode_class_name
         self.show_text = show_text
         self.fixed_len_px = fixed_len_px
-        
+        self.text_height_ratio = text_height_ratio
+
         if maxlen_px is None:
             raise ValueError("Flag mode requires maxlen to be specified")
-        
+
         logger.debug(
-            'Initializing FlagModeGenerator value="%s", height_px=%d, maxlen_px=%d, fixed_len_px=%s',
-            value, height_px, maxlen_px, fixed_len_px
+            'Initializing FlagModeGenerator value="%s", height_px=%d, maxlen_px=%d, fixed_len_px=%s, text_height_ratio=%s',
+            value, height_px, maxlen_px, fixed_len_px, text_height_ratio
         )
         
         self._image = self._generate_flag_image()
     
     def _fit_text_to_box(self, text: str, max_height: int, max_width: Optional[int],
-                         min_size: int = 6, max_size: int = 144, size_step: int = 2) -> Tuple[ImageFont.FreeTypeFont, int, int]:
+                         min_size: int = 6, max_size: Optional[int] = None, size_step: int = 2) -> Tuple[ImageFont.FreeTypeFont, int, int]:
         """Return a font that fits within max_height and optional max_width for given text."""
+        if max_size is None:
+            # tall ends need font sizes larger than the historical 144 cap
+            max_size = max(
+                144, ceil(max_height / MIN_TEXT_HEIGHT_PER_FONT_SIZE)
+            )
         # Temporary canvas for measurement
         img = Image.new("RGB", (2, 2), (255, 255, 255))
         draw = ImageDraw.Draw(img)
-        chosen_font = ImageFont.truetype(self.font_filename, size=min_size)
+        chosen_font = load_font(self.font_filename, min_size)
         chosen_w, chosen_h = 0, 0
         for size in range(min_size, max_size + 1, size_step):
             try:
-                f = ImageFont.truetype(self.font_filename, size=size)
+                f = load_font(self.font_filename, size)
             except OSError:
                 continue
             bbox = f.getbbox(text)
@@ -355,7 +439,8 @@ class FlagModeGenerator:
         BOTTOM_MARGIN_PX = 2
         TOP_MARGIN_PX = 0
         MIN_BAR_HEIGHT = 16  # px, absolute minimum for readability
-        TEXT_HEIGHT_RATIO = 0.24  # portion of end height reserved for text
+        # portion of end height reserved for text
+        TEXT_HEIGHT_RATIO = self.text_height_ratio
 
         # Fit text first (if required) within a target band and width
         text_w = text_h = 0
@@ -560,6 +645,16 @@ def main():
         help='Do not show text below barcode'
     )
     p.add_argument(
+        '-R', '--barcode-ratio', dest='barcode_ratio', action='store',
+        type=float, default=None,
+        help='Fraction of the label height (greater than 0, less than 1) to '
+             f'use for the barcode itself; default {DEFAULT_BARCODE_HEIGHT_RATIO}'
+             '. The remaining height is used for the text below the barcode, '
+             'so a smaller value gives the text a larger font. Useful on large '
+             'labels, where the default gives the barcode more height than it '
+             'needs; e.g. 0.25 on a 2x4 inch label.'
+    )
+    p.add_argument(
         '-F', '--flag', dest='flag_mode', action='store_true', default=False,
         help='Flag mode: place two rotated barcodes at opposite ends of the label '
              'for wrapping around wires. Requires maxlen to be specified.'
@@ -585,6 +680,21 @@ def main():
         nargs='+'
     )
     args = p.parse_args(sys.argv[1:])
+    if args.barcode_ratio is not None and not 0 < args.barcode_ratio < 1:
+        p.error(
+            '--barcode-ratio must be greater than 0 and less than 1, not: '
+            f'{args.barcode_ratio}'
+        )
+    # the barcode gets barcode_ratio of the height and the text is centered in
+    # what's left; in flag mode the text ratio is that leftover half.
+    barcode_ratio: float = (
+        DEFAULT_BARCODE_HEIGHT_RATIO if args.barcode_ratio is None
+        else args.barcode_ratio
+    )
+    flag_text_ratio: float = (
+        DEFAULT_FLAG_TEXT_HEIGHT_RATIO if args.barcode_ratio is None
+        else (1 - args.barcode_ratio) / 2
+    )
     dpi: int = BarcodeLabelGenerator.DPI
     height: int = TAPE_MM_TO_PX[args.tape_mm]
     if args.lp:
@@ -610,13 +720,15 @@ def main():
             g = FlagModeGenerator(
                 i, height_px=height, maxlen_px=args.maxlen_px,
                 font_filename=args.font_filename, barcode_class_name=args.symbology,
-                show_text=args.show_text, fixed_len_px=args.fixed_len_px
+                show_text=args.show_text, fixed_len_px=args.fixed_len_px,
+                text_height_ratio=flag_text_ratio
             )
         else:
             g = BarcodeLabelGenerator(
                 i, height_px=height, maxlen_px=args.maxlen_px,
                 font_filename=args.font_filename, barcode_class_name=args.symbology,
-                show_text=args.show_text, fixed_len_px=args.fixed_len_px
+                show_text=args.show_text, fixed_len_px=args.fixed_len_px,
+                barcode_height_ratio=barcode_ratio
             )
         if args.save_only:
             g.save(args.filename)
