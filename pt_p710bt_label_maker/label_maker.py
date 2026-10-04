@@ -4,7 +4,7 @@ import argparse
 import logging
 from typing import Optional, Tuple, Dict, Any, List, Literal
 from datetime import datetime
-from math import ceil
+from math import ceil, pi
 from io import BytesIO
 
 from PIL import Image, ImageDraw, ImageFont
@@ -315,6 +315,118 @@ class LabelImageGenerator:
         return background
 
 
+class FlagLabelGenerator:
+    """
+    Generates a flag-style cable label: the text is printed once in each half
+    of the label, with a blank wrap section in the middle. The wrap section is
+    wrapped around the cable and the two halves are stuck back-to-back, so the
+    text shows on both sides of the flag.
+
+    If ``rotate`` is True, the text in each half is rotated 90° with its top
+    toward the center of the label (left half rotated clockwise, right half
+    counter-clockwise, the same as ``barcode_label.FlagModeGenerator``), so
+    that both sides read upright when the flag hangs below a horizontal cable.
+    Otherwise the text runs along the label and both sides read upright when
+    the flag sticks out from a vertical cable.
+    """
+
+    #: Fraction of the label length used for the wrap section if no wrap
+    #: length is specified; same as barcode_label.FlagModeGenerator.
+    DEFAULT_WRAP_RATIO: float = 0.1
+
+    def __init__(
+        self, text: str, height_px: int, maxlen_px: int,
+        wrap_px: Optional[int] = None, font_filename: str = 'DejaVuSans.ttf',
+        text_align: Alignment = 'center', rotate: bool = False,
+        max_font_size: Optional[int] = None, wrap: bool = False
+    ):
+        self.text: str = text
+        self.height_px: int = height_px
+        self.width_px: int = int(maxlen_px)
+        if wrap_px is None:
+            wrap_px = int(self.width_px * self.DEFAULT_WRAP_RATIO)
+        self.wrap_px: int = wrap_px
+        self.half_px: int = (self.width_px - self.wrap_px) // 2
+        if self.half_px < 1:
+            raise ValueError(
+                f'Label length of {self.width_px}px is too short for a flag '
+                f'label with a wrap section of {self.wrap_px}px'
+            )
+        logger.debug(
+            'Initializing FlagLabelGenerator text="%s", height_px=%d, '
+            'width_px=%d, wrap_px=%d, half_px=%d, rotate=%s',
+            self.text, self.height_px, self.width_px, self.wrap_px,
+            self.half_px, rotate
+        )
+        # Generate the text for one half. When rotated, the text is fit to a
+        # box with height and width swapped, and rotated afterwards.
+        box_h: int = self.half_px if rotate else self.height_px
+        box_w: int = self.height_px if rotate else self.half_px
+        gen: LabelImageGenerator = LabelImageGenerator(
+            text, height_px=box_h, maxlen_px=box_w,
+            font_filename=font_filename, padding_right=0,
+            text_align=text_align, max_font_size=max_font_size, wrap=wrap
+        )
+        content: Image = self._crop_to_content(gen.image)
+        left: Image = content
+        right: Image = content
+        if rotate:
+            left = content.rotate(-90, expand=True)
+            right = content.rotate(90, expand=True)
+        self._image: Image = Image.new(
+            'RGBA', (self.width_px, self.height_px), (255, 255, 255, 0)
+        )
+        # center the content in each half, so the two halves line up when
+        # stuck back-to-back
+        self._paste_centered(left, 0)
+        self._paste_centered(right, self.width_px - self.half_px)
+        logger.info(
+            'Generated %d x %d flag label image with %dpx halves and %dpx '
+            'wrap section', self.width_px, self.height_px, self.half_px,
+            self.wrap_px
+        )
+
+    @staticmethod
+    def _crop_to_content(img: Image) -> Image:
+        """Crop an image to the bounding box of its non-transparent pixels."""
+        bbox = img.getchannel('A').getbbox()
+        if bbox is None:
+            return img
+        return img.crop(bbox)
+
+    def _paste_centered(self, img: Image, x_start: int):
+        if img.width > self.half_px or img.height > self.height_px:
+            logger.warning(
+                'Flag label text (%d x %d px) does not fit in each half of '
+                'the label (%d x %d px) and will be clipped',
+                img.width, img.height, self.half_px, self.height_px
+            )
+        x: int = x_start + (self.half_px - img.width) // 2
+        y: int = (self.height_px - img.height) // 2
+        self._image.paste(img, (x, y), img)
+
+    @property
+    def image(self) -> Image:
+        return self._image
+
+    def save(self, filename: str):
+        logger.info('Saving flag label image to: %s', filename)
+        self._image.save(filename)
+
+    def show(self):
+        self._image.show()
+        i = input('Print this image? [y|N]').strip()
+        if i not in ['y', 'Y']:
+            raise SystemExit(1)
+
+    @property
+    def file_obj(self) -> BytesIO:
+        i: BytesIO = BytesIO()
+        self._image.save(i, format='PNG')
+        i.seek(0)
+        return i
+
+
 def patch_panel_label_generator(
     generator_kwargs: dict, texts: List[str],
     save_filename: Optional[str] = None, preview: bool = False
@@ -435,6 +547,27 @@ def main():
              'maxlen on center and as many ports as arguments are specified'
     )
     p.add_argument(
+        '-F', '--flag', dest='flag', action='store_true', default=False,
+        help='Flag mode: print the text in each half of the label with a '
+             'blank section in the middle to wrap around a cable, so the '
+             'halves can be stuck together to form a flag. Use the --maxlen '
+             'options to set the total label length. Combine with -r to '
+             'rotate the text in each half 90°.'
+    )
+    wraplen = p.add_mutually_exclusive_group()
+    wraplen.add_argument(
+        '--cable-diameter-mm', dest='cable_diameter_mm', action='store',
+        type=float, default=None,
+        help='Flag mode only: cable diameter in mm, used to size the wrap '
+             'section; default: wrap section is 10%% of label length'
+    )
+    wraplen.add_argument(
+        '--cable-diameter-inches', dest='cable_diameter_in', action='store',
+        type=float, default=None,
+        help='Flag mode only: cable diameter in inches, used to size the wrap '
+             'section; default: wrap section is 10%% of label length'
+    )
+    p.add_argument(
         '-W', '--wrap', dest='wrap', action='store_true', default=False,
         help='Attempt to automatically word-wrap text for best fit on label'
     )
@@ -468,7 +601,27 @@ def main():
             'specify a maximum label length using one of: --maxlen-px, '
             '--maxlen-inches, or --maxlen-mm'
         )
-    
+
+    cable_diameter_in: Optional[float] = args.cable_diameter_in
+    if args.cable_diameter_mm is not None:
+        cable_diameter_in = args.cable_diameter_mm / 25.4
+    if args.flag:
+        if args.maxlen_px is None:
+            p.error(
+                'When using --flag (-F), you must specify the total label '
+                'length using one of: --maxlen-px, --maxlen-inches, or '
+                '--maxlen-mm'
+            )
+        if args.rotate_repeat or args.patch_panel or args.fixed_len_px:
+            p.error(
+                '--flag (-F) cannot be used with --rotate-repeat, '
+                '--patch-panel, or --fixed-len-px'
+            )
+        if args.rotate and args.wrap:
+            p.error('Text wrap is not implemented for rotated text.')
+    elif cable_diameter_in is not None:
+        p.error('--cable-diameter options can only be used with --flag (-F)')
+
     # set logging level
     if args.verbose:
         set_log_debug(logger)
@@ -501,7 +654,19 @@ def main():
         images.append(i)
     else:
         for i in args.LABEL_TEXT:
-            g = LabelImageGenerator(i, **kwargs)
+            if args.flag:
+                g = FlagLabelGenerator(
+                    i, height_px=height, maxlen_px=args.maxlen_px,
+                    wrap_px=(
+                        None if cable_diameter_in is None
+                        else ceil(pi * cable_diameter_in * dpi)
+                    ),
+                    font_filename=args.font_filename,
+                    text_align=args.alignment, rotate=args.rotate,
+                    max_font_size=args.max_font_size, wrap=args.wrap
+                )
+            else:
+                g = LabelImageGenerator(i, **kwargs)
             if args.save_only:
                 g.save(args.filename)
             if args.preview:
