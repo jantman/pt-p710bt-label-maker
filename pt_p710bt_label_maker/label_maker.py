@@ -328,17 +328,28 @@ class FlagLabelGenerator:
     that both sides read upright when the flag hangs below a horizontal cable.
     Otherwise the text runs along the label and both sides read upright when
     the flag sticks out from a vertical cable.
+
+    If ``fold_marks`` is True, short tick marks are printed at the top and
+    bottom edges of the label at each boundary between a half and the wrap
+    section, to show where to fold the label around the cable.
     """
 
     #: Fraction of the label length used for the wrap section if no wrap
     #: length is specified; same as barcode_label.FlagModeGenerator.
     DEFAULT_WRAP_RATIO: float = 0.1
 
+    #: Width in pixels of each fold mark.
+    FOLD_MARK_WIDTH_PX: int = 2
+
+    #: Length of each fold mark, as a fraction of the label height.
+    FOLD_MARK_LENGTH_RATIO: float = 0.125
+
     def __init__(
         self, text: str, height_px: int, maxlen_px: int,
         wrap_px: Optional[int] = None, font_filename: str = 'DejaVuSans.ttf',
         text_align: Alignment = 'center', rotate: bool = False,
-        max_font_size: Optional[int] = None, wrap: bool = False
+        max_font_size: Optional[int] = None, wrap: bool = False,
+        fold_marks: bool = True
     ):
         self.text: str = text
         self.height_px: int = height_px
@@ -359,9 +370,13 @@ class FlagLabelGenerator:
             self.half_px, rotate
         )
         # Generate the text for one half. When rotated, the text is fit to a
-        # box with height and width swapped, and rotated afterwards.
-        box_h: int = self.half_px if rotate else self.height_px
-        box_w: int = self.height_px if rotate else self.half_px
+        # box with height and width swapped, and rotated afterwards. If
+        # printing fold marks, leave a gap so the text doesn't touch them.
+        text_len_px: int = self.half_px
+        if fold_marks:
+            text_len_px -= 4 * self.FOLD_MARK_WIDTH_PX
+        box_h: int = text_len_px if rotate else self.height_px
+        box_w: int = self.height_px if rotate else text_len_px
         gen: LabelImageGenerator = LabelImageGenerator(
             text, height_px=box_h, maxlen_px=box_w,
             font_filename=font_filename, padding_right=0,
@@ -380,11 +395,34 @@ class FlagLabelGenerator:
         # stuck back-to-back
         self._paste_centered(left, 0)
         self._paste_centered(right, self.width_px - self.half_px)
+        if fold_marks:
+            self._draw_fold_marks()
         logger.info(
             'Generated %d x %d flag label image with %dpx halves and %dpx '
             'wrap section', self.width_px, self.height_px, self.half_px,
             self.wrap_px
         )
+
+    def _draw_fold_marks(self):
+        """
+        Draw short tick marks at the top and bottom edges of the label,
+        straddling each boundary between a half and the wrap section.
+        """
+        draw: ImageDraw = ImageDraw.Draw(self._image)
+        length: int = max(2, int(self.height_px * self.FOLD_MARK_LENGTH_RATIO))
+        for boundary in (self.half_px, self.width_px - self.half_px):
+            x0: int = boundary - self.FOLD_MARK_WIDTH_PX // 2
+            x1: int = x0 + self.FOLD_MARK_WIDTH_PX - 1
+            logger.debug(
+                'Drawing %dpx fold marks at x=%d to %d', length, x0, x1
+            )
+            draw.rectangle(
+                (x0, 0, x1, length - 1), fill=(0, 0, 0, 255)
+            )
+            draw.rectangle(
+                (x0, self.height_px - length, x1, self.height_px - 1),
+                fill=(0, 0, 0, 255)
+            )
 
     @staticmethod
     def _crop_to_content(img: Image) -> Image:
@@ -568,6 +606,12 @@ def main():
              'section; default: wrap section is 10%% of label length'
     )
     p.add_argument(
+        '--no-fold-marks', dest='fold_marks', action='store_false',
+        default=True,
+        help='Flag mode only: do not print fold guide marks at the edges of '
+             'the wrap section'
+    )
+    p.add_argument(
         '-W', '--wrap', dest='wrap', action='store_true', default=False,
         help='Attempt to automatically word-wrap text for best fit on label'
     )
@@ -621,6 +665,8 @@ def main():
             p.error('Text wrap is not implemented for rotated text.')
     elif cable_diameter_in is not None:
         p.error('--cable-diameter options can only be used with --flag (-F)')
+    elif not args.fold_marks:
+        p.error('--no-fold-marks can only be used with --flag (-F)')
 
     # set logging level
     if args.verbose:
@@ -663,7 +709,8 @@ def main():
                     ),
                     font_filename=args.font_filename,
                     text_align=args.alignment, rotate=args.rotate,
-                    max_font_size=args.max_font_size, wrap=args.wrap
+                    max_font_size=args.max_font_size, wrap=args.wrap,
+                    fold_marks=args.fold_marks
                 )
             else:
                 g = LabelImageGenerator(i, **kwargs)
