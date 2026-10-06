@@ -190,6 +190,86 @@ This command accepts the same Bluetooth/USB and NUM_COPIES options as ``pt-label
 * **-a** / **--align** - This sets the text alignment within the space of the label. Valid values are ``center`` (default), ``left``, or ``right``.
 * **-W** / **--wrap** - Automatically word-wrap text for best fit using the largest possible font. Uses the awesome `atomicparade/pil_autowrap <https://github.com/atomicparade/pil_autowrap>`__ library.
 
+Rendering and Printing Barcodes
++++++++++++++++++++++++++++++++
+
+The ``pt-barcode-label`` entrypoint renders one or more values as barcodes (using `python-barcode <https://github.com/WhyNotHugo/python-barcode>`__), by default with the value printed as human-readable text below the barcode, and prints them, all in one command.
+
+::
+
+    usage: pt-barcode-label [-h] [-v] [-C BT_CHANNEL] [-c NUM_COPIES] (-B BT_ADDRESS | -U | -L) [-T {24,18,12,9,6,4}] [--lp-dpi LP_DPI] [--lp-width-px LP_WIDTH_PX] [--lp-options LP_OPTIONS] [-s] [--filename FILENAME] [-P]
+                            [-S {CODABAR,Code128,Code39,EuropeanArticleNumber13,ITF,UniversalProductCodeA}] [-t] [-R BARCODE_RATIO] [-W] [-M] [--min-bar-height-mm MIN_BAR_HEIGHT_MM] [-F] [--maxlen-px MAXLEN_PX | --maxlen-inches MAXLEN_IN |
+                            --maxlen-mm MAXLEN_MM] [--fixed-len-px FIXED_LEN_PX] [-f FONT_FILENAME]
+                            BARCODE_VALUE [BARCODE_VALUE ...]
+    
+    Brother PT-P710BT Barcode Label Maker
+    
+    positional arguments:
+      BARCODE_VALUE         Value for barcode
+    
+    options:
+      -h, --help            show this help message and exit
+      -v, --verbose         debug-level output.
+      -C, --bt-channel BT_CHANNEL
+                            BlueTooth Channel (default: 1)
+      -c, --copies NUM_COPIES
+                            Print this number of copies of each image (default: 1)
+      -B, --bluetooth-address BT_ADDRESS
+                            BlueTooth device (MAC) address to connect to; must already be paired
+      -U, --usb             Use USB instead of bluetooth
+      -L, --lp              Instead of printing to PT-P710 via BT or USB, print to a regular lp printer, i.e. for testing or for CUPS-supported label printers
+      -T, --tape-mm {24,18,12,9,6,4}
+                            Width of tape in mm. Use 4 for 3.5mm tape. Default: 24
+      --lp-dpi LP_DPI       DPI for lp printing; defaults to 203dpi
+      --lp-width-px LP_WIDTH_PX
+                            Width in pixels for printing via LP; default 203
+      --lp-options LP_OPTIONS
+                            Options to pass to lp when printing
+      -s, --save-only       Save generates image to current directory and exit
+      --filename FILENAME   Filename to save image to; default: 20261006T053237.png
+      -P, --preview         Preview image after generating and ask if it should be printed
+      -S, --symbology {CODABAR,Code128,Code39,EuropeanArticleNumber13,ITF,UniversalProductCodeA}
+                            Barcode symbology to use
+      -t, --no-text         Do not show text below barcode
+      -R, --barcode-ratio BARCODE_RATIO
+                            Fraction of the label height (greater than 0, less than 1) to use for the barcode itself; default 0.5. The remaining height is used for the text below the barcode, so a smaller value gives the text a larger font. Useful on
+                            large labels, where the default gives the barcode more height than it needs; e.g. 0.25 on a 2x4 inch label.
+      -W, --wrap            Word-wrap the text below the barcode onto multiple lines if that allows a larger font. Text is broken at whitespace or after any of: -_/.:
+      -M, --max-text        Make the text as large as possible while keeping a scannable barcode: shrinks the bars to --min-bar-height-mm, gives the text all of the remaining label height, and implies --wrap. Cannot be combined with --barcode-ratio.
+      --min-bar-height-mm MIN_BAR_HEIGHT_MM
+                            Height of the bars themselves with --max-text; default 6.35mm (0.25 inch). Raise this if your scanner has trouble reading the labels.
+      -F, --flag            Flag mode: place two rotated barcodes at opposite ends of the label for wrapping around wires. Requires maxlen to be specified.
+      --maxlen-px MAXLEN_PX
+                            Maximum label length in pixels
+      --maxlen-inches MAXLEN_IN
+                            Maximum label length in inches
+      --maxlen-mm MAXLEN_MM
+                            Maximum label length in mm
+      --fixed-len-px FIXED_LEN_PX
+                            Center barcode in fixed length image of this many pixels long
+      -f, --font-filename FONT_FILENAME
+                            Font filename; Default: DejaVuSans.ttf (default taken from PT_FONT_FILE env var if set)
+
+This command accepts the same Bluetooth/USB, NUM_COPIES, ``-T`` / ``--tape-mm``, lp, **-s** / **--save-only**, **--filename**, **-P** / **--preview**, and **-f** / **--font-filename** options as ``pt-label-maker``, plus a number of options specific to barcodes:
+
+* **BARCODE_VALUE** - One or more values to encode. Each value is printed as a separate label; ``pt-barcode-label -U A1 A2 A3`` prints three labels. The value must be valid for the chosen symbology (e.g. numeric only, of the correct length, for EAN-13 and UPC-A).
+* **-S** / **--symbology** - The barcode symbology to use; default ``Code128``. The available choices are the symbologies provided by python-barcode, as shown in the usage output above.
+* **-t** / **--no-text** - Print only the barcode, using the full height of the label for the bars, without the value as text below it.
+* **--maxlen-px** / **--maxlen-inches** / **--maxlen-mm** - These options, mutually exclusive, set a maximum label length. The text below the barcode is fit (and, with **--wrap**, wrapped) to this length. The barcode itself is drawn at its minimum printable module (narrow bar) width with quiet zones on each end, so for long values it may be longer than this. Required for flag mode.
+* **--fixed-len-px** - Center the barcode (and text) in a label of exactly this many pixels long. In flag mode, this sets the total label length.
+* **-R** / **--barcode-ratio** - The fraction of the label height, greater than 0 and less than 1, used for the bars themselves; default ``0.5``. The text is vertically centered in the remaining height and gets half of it, so a smaller value gives the text a larger font. This is useful on large labels, where the default gives the barcode far more height than it needs to scan; e.g. ``0.25`` on a 2x4 inch label. A warning is logged if the resulting bars are shorter than 6.35mm (0.25 inch), below which scanners tend to have trouble. In flag mode, the text in each end gets ``(1 - ratio) / 2`` of that end's height.
+* **-W** / **--wrap** - Word-wrap the text below the barcode onto multiple lines when that allows a larger font. The largest font size at which the wrapped text fits within the text area and ``--maxlen`` is used. Since barcode values often contain no spaces, text can be broken at whitespace or after any of the characters ``-``, ``_``, ``/``, ``.``, and ``:`` (e.g. ``SERVER-RACK-01`` can be printed as ``SERVER-`` / ``RACK-01``). Has no effect without one of the ``--maxlen`` options. Not supported in flag mode or with ``--no-text``.
+* **-M** / **--max-text** - Print the text as large as possible while keeping a scannable barcode. The bars are shrunk to the minimum height set by **--min-bar-height-mm**, the text is allowed to use all of the label height below the barcode (instead of only half of what's left, as with **--barcode-ratio**), and **--wrap** is enabled. This is intended for labels that need to be readable at a distance, such as on large tapes or with ``-L`` on 2x4 inch labels. Note that on narrow tapes (e.g. 12mm) the default layout already prints bars shorter than the minimum, so ``--max-text`` will make the text *smaller* in order to keep the barcode scannable; an error is printed if the minimum bar height does not fit on the label at all. Cannot be combined with ``--barcode-ratio``, ``--no-text``, or flag mode.
+* **--min-bar-height-mm** - The height of the bars themselves when using **--max-text**; default 6.35mm (0.25 inch). Raise this if your scanner has trouble reading the labels.
+* **-F** / **--flag** - Print a flag-style barcode label for wrapping around wires or cables. A barcode (with text, unless ``--no-text`` is given) is printed rotated 90° at each end of the label, with blank space in the middle to wrap around the cable. Requires one of the ``--maxlen`` options; the total label length is ``--fixed-len-px`` if given, otherwise the maxlen.
+
+Examples:
+
+* A Code128 barcode on 24mm tape, at most 2 inches long: ``pt-barcode-label -U -T 24 --maxlen-inches 2 SERVER-RACK-01``
+* The same, with the largest readable text that still leaves a scannable barcode: ``pt-barcode-label -U -T 24 --maxlen-inches 2 -M SERVER-RACK-01``
+* Test the layout of a 2x4 inch label without printing, saving it as a PNG: ``pt-barcode-label -L --lp-dpi 203 --lp-width-px 406 --maxlen-inches 4 -M -s --filename out.png 'rack 12 shelf 3'``
+* A flag label for a cable on 12mm tape: ``pt-barcode-label -U -T 12 -F --maxlen-inches 3 PP-12``
+
 Printing With lp
 ^^^^^^^^^^^^^^^^
 

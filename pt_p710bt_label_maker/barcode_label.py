@@ -2,6 +2,7 @@ import sys
 import os
 import argparse
 import logging
+import re
 from typing import Optional, Tuple, Dict, Any, List, Literal, Callable
 from datetime import datetime
 from math import ceil, floor
@@ -43,6 +44,19 @@ MIN_RECOMMENDED_BAR_HEIGHT_MM: float = 6.35  # 0.25 inch
 #: bound how large a font we ever need to try to fill a given text height.
 MIN_TEXT_HEIGHT_PER_FONT_SIZE: float = 0.7
 
+#: Characters after which wrapped text may be broken onto a new line, in
+#: addition to whitespace. Barcode values often have no spaces at all, but are
+#: commonly delimited by these.
+WRAP_BREAK_AFTER: str = '-_/.:'
+
+#: Pixels between lines of wrapped text.
+WRAP_LINE_SPACING_PX: int = 4
+
+#: When the text fills all of the height below the barcode (``fill_text``),
+#: pixels left blank between the bottom of the text and the edge of the label.
+#: The barcode image's own bottom margin separates the text from the bars.
+FILL_TEXT_BOTTOM_MARGIN_PX: int = 2
+
 #: Cache of loaded fonts, keyed by (filename, size). We try every font size in
 #: a range to fit text to the label, and on a tall label that's hundreds of
 #: sizes per label, so avoid re-loading them for each value printed.
@@ -71,8 +85,17 @@ class BarcodeLabelGenerator:
         font_filename: str = 'DejaVuSans.ttf',
         barcode_class_name: str = 'Code128', show_text: bool = True,
         fixed_len_px: Optional[int] = None,
-        barcode_height_ratio: float = DEFAULT_BARCODE_HEIGHT_RATIO
+        barcode_height_ratio: float = DEFAULT_BARCODE_HEIGHT_RATIO,
+        wrap: bool = False, fill_text: bool = False
     ):
+        """
+        :param wrap: word-wrap the text below the barcode onto multiple lines
+          (breaking at whitespace or after any of ``WRAP_BREAK_AFTER``) if
+          that allows a larger font.
+        :param fill_text: let the text use all of the height below the
+          barcode, instead of only half of it centered with padding above and
+          below.
+        """
         if not 0 < barcode_height_ratio < 1:
             raise ValueError(
                 f'barcode_height_ratio must be greater than 0 and less than 1, '
@@ -87,22 +110,14 @@ class BarcodeLabelGenerator:
         # for height, see media_info.TAPE_MM_TO_PX
         self.height_px: int = height_px
         self.barcode_height_ratio: float = barcode_height_ratio
-        self.fonts: Dict[int, ImageFont.FreeTypeFont] = self._get_fonts(
-            font_file=font_filename,
-            # tall labels need font sizes larger than the historical 144 cap,
-            # especially with a small barcode_height_ratio
-            max_size=max(
-                144,
-                ceil(self.text_max_height_px / MIN_TEXT_HEIGHT_PER_FONT_SIZE)
-            )
-        )
-        logger.debug('Loaded %d font options', len(self.fonts))
+        self.wrap: bool = wrap
+        self.fill_text: bool = fill_text
         logger.debug(
             'Initializing BarcodeLabelGenerator value="%s", symbology="%s" (%s)'
             ', height_px=%d, maxlen_px=%s, show_text=%s, '
-            'barcode_height_ratio=%s',
+            'barcode_height_ratio=%s, wrap=%s, fill_text=%s',
             self.value, self.symbology, self.barcode_cls, self.height_px,
-            maxlen_px, show_text, barcode_height_ratio
+            maxlen_px, show_text, barcode_height_ratio, wrap, fill_text
         )
         if (
             self.show_text
@@ -129,6 +144,18 @@ class BarcodeLabelGenerator:
             'Generated barcode image of %spx wide x %spx high',
             self._barcode_image.width, self._barcode_image.height
         )
+        # loaded after the barcode image, as text_max_height_px depends on its
+        # height when fill_text is set
+        self.fonts: Dict[int, ImageFont.FreeTypeFont] = self._get_fonts(
+            font_file=font_filename,
+            # tall labels need font sizes larger than the historical 144 cap,
+            # especially with a small barcode_height_ratio
+            max_size=max(
+                144,
+                ceil(self.text_max_height_px / MIN_TEXT_HEIGHT_PER_FONT_SIZE)
+            )
+        )
+        logger.debug('Loaded %d font options', len(self.fonts))
         self._image: Image
         if self.show_text:
             self._image = self._generate_combined_image()
@@ -163,10 +190,21 @@ class BarcodeLabelGenerator:
         Maximum height in pixels for the text below the barcode. The text is
         vertically centered in the height left over by the barcode, and gets
         half of that leftover height; the rest is padding above and below it.
+        If ``fill_text`` is set, the text instead gets all of the height below
+        the barcode image (whose bottom margin separates it from the bars),
+        less ``FILL_TEXT_BOTTOM_MARGIN_PX``.
         """
+        if self.fill_text:
+            return max(
+                1,
+                self.height_px - self._barcode_image.height -
+                FILL_TEXT_BOTTOM_MARGIN_PX
+            )
         return floor(self.height_px * (1 - self.barcode_height_ratio) / 2)
 
     def _generate_combined_image(self) -> Image:
+        if self.wrap:
+            return self._generate_combined_wrapped_image()
         font: ImageFont.FreeTypeFont
         text_w: int
         text_h: int
@@ -205,6 +243,47 @@ class BarcodeLabelGenerator:
             'anchor': 'mm'
         }
         draw.text(**kwargs)
+        return img
+
+    def _generate_combined_wrapped_image(self) -> Image:
+        font: ImageFont.FreeTypeFont
+        text: str
+        bbox: Tuple[int, int, int, int]
+        font, text, bbox = self._fit_wrapped_text_to_box(
+            self.text_max_height_px, self.maxlen_px
+        )
+        text_w: int = ceil(bbox[2] - bbox[0])
+        text_h: int = ceil(bbox[3] - bbox[1])
+        width = max([self._barcode_image.width, text_w])
+        logger.debug(
+            'Generating %d x %d RGBA image', width, self.height_px
+        )
+        img: Image = Image.new(
+            'RGBA',
+            (width, self.height_px),
+            (255, 255, 255, 0)
+        )
+        img.paste(
+            self._barcode_image,
+            box=(
+                floor((width - self._barcode_image.width) / 2),
+                0
+            )
+        )
+        # center the inked bounding box of the text in the space below the
+        # barcode; bbox was measured with the text drawn at (0, 0)
+        center_y: int = self._barcode_image.height + floor(
+            (self.height_px - self._barcode_image.height) / 2
+        )
+        draw: ImageDraw = ImageDraw.Draw(img)
+        draw.multiline_text(
+            xy=(
+                floor(width / 2 - text_w / 2 - bbox[0]),
+                floor(center_y - text_h / 2 - bbox[1])
+            ),
+            text=text, fill=(0, 0, 0, 255), font=font, align='center',
+            spacing=WRAP_LINE_SPACING_PX
+        )
         return img
 
     def _generate_barcode_image(self, maxlen_px: Optional[int]) -> Image:
@@ -310,6 +389,77 @@ class BarcodeLabelGenerator:
             '%dpx', last, last_width, last_height
         )
         return self.fonts[last], last_width, last_height
+
+    def _wrap_text(
+        self, font: ImageFont.FreeTypeFont, max_width: Optional[int]
+    ) -> str:
+        """
+        Greedily wrap ``self.value`` to fit ``max_width`` pixels at ``font``,
+        breaking at whitespace or after any of ``WRAP_BREAK_AFTER``. A piece
+        that can't be broken further may still be wider than ``max_width``.
+        """
+        if max_width is None:
+            return self.value
+        brk: str = re.escape(WRAP_BREAK_AFTER)
+        # (separator to join with the previous piece, piece)
+        pieces: List[Tuple[str, str]] = []
+        for word in self.value.split():
+            for idx, piece in enumerate(
+                re.findall(rf'[^{brk}]*[{brk}]+|[^{brk}]+', word)
+            ):
+                pieces.append((' ' if idx == 0 else '', piece))
+        lines: List[str] = []
+        current: str = ''
+        for sep, piece in pieces:
+            if not current:
+                current = piece
+            elif font.getlength(current + sep + piece) <= max_width:
+                current += sep + piece
+            else:
+                lines.append(current)
+                current = piece
+        lines.append(current)
+        return '\n'.join(lines)
+
+    def _fit_wrapped_text_to_box(
+        self, max_height: int, max_width: Optional[int] = None
+    ) -> Tuple[ImageFont.FreeTypeFont, str, Tuple[int, int, int, int]]:
+        """
+        Find the largest ImageFont at which ``self.value``, word-wrapped to
+        ``max_width``, fits within ``max_height`` and ``max_width``. Return a
+        3-tuple of that ImageFont, the wrapped text, and its inked bounding
+        box when drawn at (0, 0).
+        """
+        img: Image = Image.new("RGB", (2, 2), (255, 255, 255))
+        draw: ImageDraw = ImageDraw.Draw(img)
+        logger.debug(
+            'Finding maximum font size that fits "%s" wrapped in %d pixels '
+            'high and %s pixels wide', self.value, max_height, max_width
+        )
+        sizes: List[int] = sorted(self.fonts.keys(), reverse=True)
+        result: Optional[
+            Tuple[ImageFont.FreeTypeFont, str, Tuple[int, int, int, int]]
+        ] = None
+        for i in sizes:
+            text: str = self._wrap_text(self.fonts[i], max_width)
+            bbox = draw.multiline_textbbox(
+                (0, 0), text, font=self.fonts[i], align='center',
+                spacing=WRAP_LINE_SPACING_PX
+            )
+            w = bbox[2] - bbox[0]
+            h = bbox[3] - bbox[1]
+            logger.debug(
+                'Wrapped text dimensions for size %d: %d x %d (%d lines)',
+                i, w, h, text.count('\n') + 1
+            )
+            result = (self.fonts[i], text, bbox)
+            if h <= max_height and (max_width is None or w <= max_width):
+                break
+        logger.info(
+            'Font size %d is largest to fit wrapped text; wrapped as: %s',
+            result[0].size, result[1].replace('\n', ' | ')
+        )
+        return result
 
     def mm2px(self, mm: float) -> float:
         # copied from barcode.writer
@@ -655,6 +805,27 @@ def main():
              'needs; e.g. 0.25 on a 2x4 inch label.'
     )
     p.add_argument(
+        '-W', '--wrap', dest='wrap', action='store_true', default=False,
+        help='Word-wrap the text below the barcode onto multiple lines if '
+             'that allows a larger font. Text is broken at whitespace or after '
+             f'any of: {WRAP_BREAK_AFTER}'
+    )
+    p.add_argument(
+        '-M', '--max-text', dest='max_text', action='store_true',
+        default=False,
+        help='Make the text as large as possible while keeping a scannable '
+             'barcode: shrinks the bars to --min-bar-height-mm, gives the text '
+             'all of the remaining label height, and implies --wrap. Cannot '
+             'be combined with --barcode-ratio.'
+    )
+    p.add_argument(
+        '--min-bar-height-mm', dest='min_bar_height_mm', action='store',
+        type=float, default=MIN_RECOMMENDED_BAR_HEIGHT_MM,
+        help='Height of the bars themselves with --max-text; default '
+             f'{MIN_RECOMMENDED_BAR_HEIGHT_MM}mm (0.25 inch). Raise this if '
+             'your scanner has trouble reading the labels.'
+    )
+    p.add_argument(
         '-F', '--flag', dest='flag_mode', action='store_true', default=False,
         help='Flag mode: place two rotated barcodes at opposite ends of the label '
              'for wrapping around wires. Requires maxlen to be specified.'
@@ -685,6 +856,14 @@ def main():
             '--barcode-ratio must be greater than 0 and less than 1, not: '
             f'{args.barcode_ratio}'
         )
+    if args.max_text and args.barcode_ratio is not None:
+        p.error('--max-text cannot be combined with --barcode-ratio')
+    if (args.wrap or args.max_text) and args.flag_mode:
+        p.error('--wrap and --max-text are not supported in flag mode')
+    if (args.wrap or args.max_text) and not args.show_text:
+        p.error('--wrap and --max-text cannot be combined with --no-text')
+    if args.min_bar_height_mm <= 0:
+        p.error('--min-bar-height-mm must be greater than 0')
     # the barcode gets barcode_ratio of the height and the text is centered in
     # what's left; in flag mode the text ratio is that leftover half.
     barcode_ratio: float = (
@@ -704,6 +883,16 @@ def main():
         args.maxlen_px = int(args.maxlen_in * dpi)
     elif args.maxlen_mm:
         args.maxlen_px = int((args.maxlen_mm / 25.4) * dpi)
+    if args.max_text:
+        # pick the ratio that yields exactly the minimum bar height; the half
+        # pixel keeps floor() in bar_height_px from rounding it down a pixel
+        min_bar_px: int = ceil((args.min_bar_height_mm / 25.4) * dpi)
+        barcode_ratio = (min_bar_px + 0.5) / height
+        if barcode_ratio >= 1:
+            p.error(
+                f'--min-bar-height-mm of {args.min_bar_height_mm}mm '
+                f'({min_bar_px}px) does not fit on a {height}px high label'
+            )
     # set logging level
     if args.verbose:
         set_log_debug(logger)
@@ -728,7 +917,8 @@ def main():
                 i, height_px=height, maxlen_px=args.maxlen_px,
                 font_filename=args.font_filename, barcode_class_name=args.symbology,
                 show_text=args.show_text, fixed_len_px=args.fixed_len_px,
-                barcode_height_ratio=barcode_ratio
+                barcode_height_ratio=barcode_ratio,
+                wrap=args.wrap or args.max_text, fill_text=args.max_text
             )
         if args.save_only:
             g.save(args.filename)
